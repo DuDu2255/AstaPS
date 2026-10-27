@@ -57,6 +57,9 @@ jobs:
           retention-days: 7
 
       - name: Upload jar
+        # The build is useful for review even when a separate test fails; the run still reports
+        # the test failure, while this keeps the successfully compiled artifact available.
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: grasscutter
