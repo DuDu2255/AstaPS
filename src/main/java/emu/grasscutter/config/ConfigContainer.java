@@ -40,9 +40,10 @@ public class ConfigContainer {
      * Version 16 - 'server.http.webConsole' was added for the password-protected web console.
      * Version 17 - 'gameOptions.unlockAllOpenStatesOnLogin' controls optional login feature unlock.
      * Version 18 - 'gameOptions.mapFogEnabled' controls exploration fog (enabled by default).
+     * Version 19 - 'gameOptions.watermark' adds configurable UID watermark text and colors.
      */
     private static int version() {
-        return 18;
+        return 19;
     }
 
     /**
