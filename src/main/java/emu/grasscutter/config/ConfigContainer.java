@@ -580,8 +580,17 @@ public class ConfigContainer {
             public boolean triggerAllOnLogin = false;
         }
 
-        /** How the login Lua shell watermark is sent; its text is the built-in LuaShell chunk. */
+        /** Controls the text and color sent to the client's UID watermark. */
         public static class WatermarkOptions {
+            /* Replace the UID watermark text for everyone on this server. */
+            public boolean enabled = true;
+            /* Empty keeps the built-in login Lua shell. {uid} inserts the player's UID; otherwise
+             * the UID is appended to the configured text. The encoded text is limited to 254 bytes. */
+            public String text = "";
+            /* Start color as #RRGGBB or #RGB. Blank or invalid values leave text uncolored. */
+            public String color = "#9333EA";
+            /* Optional gradient end color. Blank or invalid values use a flat start color. */
+            public String gradientTo = "#FF1493";
             /* CmdId to send the wind seed notify under. 0 (recommended) uses
              * PacketOpcodes.WindSeedType1Notify, 29056 in 7.1. Set to -1 to send nothing at all.
              *

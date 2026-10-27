@@ -1,6 +1,10 @@
 package emu.grasscutter.server.packet.recv;
 
+import emu.grasscutter.Grasscutter;
+import emu.grasscutter.config.ConfigContainer;
+import emu.grasscutter.config.Configuration;
 import emu.grasscutter.game.dungeons.DomainDungeonHelper;
+import emu.grasscutter.game.player.Player;
 import emu.grasscutter.game.player.Player.SceneLoadState;
 import emu.grasscutter.game.player.WidgetPetHelper;
 import emu.grasscutter.net.packet.*;
@@ -8,6 +12,7 @@ import emu.grasscutter.net.proto.SceneInitFinishReqOuterClass.SceneInitFinishReq
 import emu.grasscutter.server.game.GameSession;
 import emu.grasscutter.server.packet.send.*;
 import emu.grasscutter.utils.LuaShell;
+import emu.grasscutter.utils.WatermarkGradientHelper;
 
 @Opcodes(PacketOpcodes.SceneInitFinishReq)
 public class HandlerSceneInitFinishReq extends PacketHandler {
@@ -60,11 +65,26 @@ public class HandlerSceneInitFinishReq extends PacketHandler {
         WidgetPetHelper.syncEquippedWidget(player);
 
         session.send(new PacketSceneInitFinishRsp(player));
-        // The built-in LuaShell chunk rewrites only the "UID:" prefix, so the UID stays on screen.
-        session.send(new PacketWindSeedClientNotify(LuaShell.getLuaShell()));
+        session.send(buildWatermarkPacket(player));
 
         player.setSceneLoadState(SceneLoadState.INIT);
 
         player.getScene().playerSceneInitialized(player);
+    }
+
+    private static PacketWindSeedClientNotify buildWatermarkPacket(Player player) {
+        ConfigContainer.GameOptions.WatermarkOptions options = Configuration.GAME_OPTIONS.watermark;
+        if (!options.enabled || options.text == null || options.text.isBlank()) {
+            return new PacketWindSeedClientNotify(LuaShell.getLuaShell());
+        }
+
+        String text = WatermarkGradientHelper.buildDisplayText(options, player);
+        String colored = WatermarkGradientHelper.applyGradient(options, text);
+        byte[] payload = UidWatermarkScript.forText(colored);
+        if (payload != null) return new PacketWindSeedClientNotify(payload);
+
+        Grasscutter.getLogger()
+                .warn("Watermark text exceeds the 254-byte limit; using the login Lua shell instead.");
+        return new PacketWindSeedClientNotify(LuaShell.getLuaShell());
     }
 }
