@@ -297,7 +297,27 @@ public final class Utils {
     }
 
     public static String getLanguageCode(Locale locale) {
-        return String.format("%s-%s", locale.getLanguage(), locale.getCountry());
+        String language = locale.getLanguage();
+        String country = locale.getCountry();
+
+        if (country.isEmpty()) {
+            // Gson's Locale adapter uses underscores, so a config value like "zh-CN"
+            // can arrive as a language-only Locale("zh-cn"). Accept it as a BCP 47 tag.
+            Locale languageTag = Locale.forLanguageTag(language.replace('_', '-'));
+            if (!languageTag.getCountry().isEmpty()) {
+                return languageTag.toLanguageTag();
+            }
+
+            // The bundled command translations use regional Chinese filenames. A locale
+            // with only "zh" is the common Android/Termux default for Simplified Chinese.
+            if ("zh".equalsIgnoreCase(languageTag.getLanguage())) {
+                return "Hant".equalsIgnoreCase(languageTag.getScript()) ? "zh-TW" : "zh-CN";
+            }
+
+            return language;
+        }
+
+        return language + "-" + country;
     }
 
     public static String base64Encode(byte[] toEncode) {
