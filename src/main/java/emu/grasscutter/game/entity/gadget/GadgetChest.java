@@ -83,6 +83,9 @@ public class GadgetChest extends GadgetContent {
                                 InterOpTypeOuterClass.InterOpType.InterOpType_INTER_OP_START));
                 return false;
             }
+            if (!emu.grasscutter.game.managers.blossom.BlossomManager.isClaimFinish(req)) {
+                return false;
+            }
             var rewards = blossomManager.claimReward(player, getGadget(),
                     req, () -> claimedBossUids.add(player.getUid()));
             if (rewards != null) {
@@ -284,13 +287,28 @@ public class GadgetChest extends GadgetContent {
                         .filter(bossUids::contains)
                         .allMatch(claimedBossUids::contains);
         if (allClaimed) {
+            // Finish the original Group/config interaction before retiring its
+            // Lua group; retiring first can despawn this reward entity too soon.
+            finishOpen(player, meta, credit);
             if (getGadget().getScene().getSceneType() == SceneType.SCENE_WORLD) {
                 getGadget().getScene().getBlossomManager().retireChest(getGadget());
             }
-            finishOpen(player, meta, credit);
             WorldBossSpawnHelper.onBossChestClaimed(getGadget());
         }
         return allClaimed;
+    }
+
+    /**
+     * Whether the group's own chest_drop_id decides the loot. Configured chest rules cover only
+     * the chest kinds ChestTypeResolver knows; anything else with a native drop table (investigation
+     * points, "SearchPoint" 70210101/70210102) used to throw and leave the F prompt dead.
+     */
+    static boolean usesNativeDrop(
+            SceneType sceneType, int groupId, boolean questItemDrop, String chestType) {
+        return sceneType == SceneType.SCENE_DUNGEON
+                || groupId == 0
+                || questItemDrop
+                || chestType == null;
     }
 
     private boolean grantOrdinaryChestLoot(Player player) {
@@ -299,9 +317,11 @@ public class GadgetChest extends GadgetContent {
         if (meta != null && meta.chest_drop_id > 0) {
             DropSystem dropSystem = player.getServer().getDropSystem();
             // Quest-created chests have no Lua group; scripted quest chests are identified by loot.
-            if ((gadget.getScene().getSceneType() == SceneType.SCENE_DUNGEON
-                            || gadget.getGroupId() == 0
-                            || dropSystem.hasQuestItemDrop(meta.chest_drop_id))
+            if (usesNativeDrop(
+                            gadget.getScene().getSceneType(),
+                            gadget.getGroupId(),
+                            dropSystem.hasQuestItemDrop(meta.chest_drop_id),
+                            ChestTypeResolver.resolve(gadget))
                     && dropSystem.handleChestDrop(
                             meta.chest_drop_id, Math.max(1, meta.drop_count), gadget)) {
                 ordinaryClaimed = true;
@@ -525,10 +545,16 @@ public class GadgetChest extends GadgetContent {
         return present;
     }
 
+    /** Native Lua blossom markers omit boss_chest; the generated reward owns its claim metadata. */
+    static boolean keepSpawnedChestMeta(SceneGadget meta) {
+        return meta != null && meta.boss_chest != null
+                && (meta.is_blossom_chest || meta.drop_tag != null);
+    }
+
     private SceneGadget resolveChestMeta() {
         EntityGadget entityGadget = getGadget();
         SceneGadget meta = entityGadget.getMetaGadget();
-        if (meta != null && meta.boss_chest != null && meta.drop_tag != null) {
+        if (keepSpawnedChestMeta(meta)) {
             return meta;
         }
         if (entityGadget.getScene() == null) {

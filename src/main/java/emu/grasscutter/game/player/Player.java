@@ -129,6 +129,20 @@ public class Player implements PlayerHook, FieldFetch {
     @Getter private Map<Integer, ActiveCookCompoundData> activeCookCompounds;
     @Getter private Map<Integer, Integer> questGlobalVariables;
     @Getter private Map<Integer, Integer> openStates;
+    /** One durable incarnation for each native ley-line refresh. */
+    private Map<String, BlossomRunState> blossomRuns = new HashMap<>();
+    /** Claim retries are scoped to host UID / refresh ID / incarnation. */
+    private Map<String, Integer> blossomClaimAttempts = new HashMap<>();
+
+    @Entity(useDiscriminator = false)
+    public static class BlossomRunState {
+        public int campId;
+        public long incarnation;
+        public boolean rewardReady;
+        public boolean consumed;
+
+        public BlossomRunState() {}
+    }
     // TPS ammunition reserve, keyed by TpsAmmunitionExcelConfigData id.
     private Map<Integer, Integer> tpsAmmunition;
     // TPS weapons the TPS traveler wears; it is a trial avatar and is never saved itself.
@@ -251,6 +265,13 @@ public class Player implements PlayerHook, FieldFetch {
     private HashMap<String, MapMark> mapMarks;
     @Getter @Setter private int nextResinRefresh;
     @Getter @Setter private int resinBuyCount;
+    private WeeklyBossClaimState weeklyBossClaimState;
+
+    public synchronized WeeklyBossClaimState getWeeklyBossClaimState() {
+        if (weeklyBossClaimState == null) weeklyBossClaimState = new WeeklyBossClaimState();
+        return weeklyBossClaimState;
+    }
+
     @Getter @Setter private int lastDailyReset;
     @Getter private transient MpSettingType mpSetting = MpSettingType.MpSettingType_MP_SETTING_ENTER_AFTER_APPLY;
     @Getter private long playerGameTime = 540000;
@@ -1498,8 +1519,8 @@ public class Player implements PlayerHook, FieldFetch {
 
         int currentTime = Utils.getCurrentSeconds();
 
-        var currentDate = LocalDate.ofInstant(Instant.ofEpochSecond(currentTime), ZoneId.systemDefault());
-        var lastResetDate = LocalDate.ofInstant(Instant.ofEpochSecond(this.getLastDailyReset()), ZoneId.systemDefault());
+        var currentDate = GameDay.date(currentTime);
+        var lastResetDate = GameDay.date(this.getLastDailyReset());
 
         if (!currentDate.isAfter(lastResetDate)) {
             return;
@@ -1509,21 +1530,26 @@ public class Player implements PlayerHook, FieldFetch {
 
         this.getBattlePassManager().resetDailyMissions();
 
-        this.getBattlePassManager().triggerMission(WatcherTriggerType.TRIGGER_LOGIN);
-
-        if (currentDate.getDayOfWeek() == DayOfWeek.MONDAY) {
+        if (GameDay.crossedWeeklyReset(this.getLastDailyReset(), currentTime)) {
             this.getBattlePassManager().resetWeeklyMissions();
         }
+        this.getBattlePassManager().triggerMission(WatcherTriggerType.TRIGGER_LOGIN);
 
         if (this.dailyTaskManager != null) {
             this.dailyTaskManager.resetDailyTasksForNewDay();
         }
 
         this.setResinBuyCount(0);
+        // Expired, already-claimed ley lines must become eligible again.
+        // Earned, unclaimed flowers retain their claim identity across reset.
+        this.resetConsumedBlossomsForNewDay();
 
         BirthdayMailSystem.checkAndSend(this, currentDate);
 
         this.setLastDailyReset(currentTime);
+        if (this.scene != null && this.scene.getBlossomManager() != null) {
+            this.scene.getBlossomManager().notifyIcon();
+        }
     }
 
     public void resetSendPlayerLocTime() {
@@ -1565,6 +1591,99 @@ public class Player implements PlayerHook, FieldFetch {
         return this.tpsAmmunition;
     }
 
+    private static String blossomSlot(int refreshId, int slot) {
+        return refreshId + ":" + slot;
+    }
+
+    public synchronized int getBlossomCampId(int refreshId, int slot) {
+        var run = blossomRuns == null ? null : blossomRuns.get(blossomSlot(refreshId, slot));
+        return run == null ? 0 : run.campId;
+    }
+
+    public synchronized long getBlossomIncarnation(int refreshId, int slot) {
+        var run = blossomRuns == null ? null : blossomRuns.get(blossomSlot(refreshId, slot));
+        return run == null ? 0 : run.incarnation;
+    }
+
+    public synchronized boolean isBlossomRewardReady(int refreshId, int slot) {
+        var run = blossomRuns == null ? null : blossomRuns.get(blossomSlot(refreshId, slot));
+        return run != null && run.rewardReady;
+    }
+
+    public synchronized boolean isBlossomConsumed(int refreshId, int slot) {
+        var run = blossomRuns == null ? null : blossomRuns.get(blossomSlot(refreshId, slot));
+        return run != null && run.consumed;
+    }
+
+    /** Initial selection reuses an unchanged run; a claimed rotation starts a new epoch. */
+    public synchronized void setBlossomCampId(int refreshId, int slot, int campId) {
+        enterBlossomCamp(refreshId, slot, campId, false);
+    }
+
+    public synchronized void advanceBlossomCampId(int refreshId, int slot, int campId) {
+        enterBlossomCamp(refreshId, slot, campId, true);
+    }
+
+    private void enterBlossomCamp(int refreshId, int slot, int campId, boolean advance) {
+        if (blossomRuns == null) blossomRuns = new HashMap<>();
+        String key = blossomSlot(refreshId, slot);
+        var previous = blossomRuns.get(key);
+        if (!advance && previous != null && previous.campId == campId) return;
+        var run = new BlossomRunState();
+        run.campId = campId;
+        run.incarnation = previous == null ? 1
+                : previous.incarnation + (previous.campId == 0 && !advance ? 0 : 1);
+        blossomRuns.put(key, run);
+        save();
+    }
+
+    /**
+     * Only completed and exhausted flowers reset with the daily boundary.
+     * In-progress or earned unclaimed rewards keep their existing receipt identity.
+     * Exhausted runs clear their previous camp for a new section-head selection.
+     * The daily boundary starts exactly one new claim epoch.
+     */
+    public synchronized boolean resetConsumedBlossomsForNewDay() {
+        if (blossomRuns == null || blossomRuns.isEmpty()) return false;
+        boolean changed = false;
+        for (var run : blossomRuns.values()) {
+            if (run == null || !run.consumed) continue;
+            run.incarnation++;
+            run.campId = 0;
+            run.rewardReady = false;
+            run.consumed = false;
+            changed = true;
+        }
+        if (changed) save();
+        return changed;
+    }
+
+    /** Persist the reward phase before presenting its claimable entity. */
+    public synchronized void setBlossomRewardReady(int refreshId, int slot) {
+        var run = blossomRuns.get(blossomSlot(refreshId, slot));
+        if (run == null || run.rewardReady) return;
+        run.rewardReady = true;
+        save();
+    }
+
+    public synchronized void setBlossomConsumed(int refreshId, int slot) {
+        var run = blossomRuns.get(blossomSlot(refreshId, slot));
+        if (run == null || run.consumed) return;
+        run.consumed = true;
+        save();
+    }
+
+    public synchronized int getBlossomClaimAttempt(String runId) {
+        return blossomClaimAttempts == null ? 0 : blossomClaimAttempts.getOrDefault(runId, 0);
+    }
+
+    /** A definitely unpaid journal attempt can be retried with a fresh operation identity. */
+    public synchronized void advanceBlossomClaimAttempt(String runId) {
+        if (blossomClaimAttempts == null) blossomClaimAttempts = new HashMap<>();
+        blossomClaimAttempts.merge(runId, 1, Integer::sum);
+        save();
+    }
+
     public void save() {
         DatabaseHelper.savePlayer(this);
     }
@@ -1589,23 +1708,31 @@ public class Player implements PlayerHook, FieldFetch {
 
         runner.submit(this.getFriendsList()::loadFromDatabase);
         runner.submit(this.getMailHandler()::loadFromDatabase);
-        runner.submit(this.getQuestManager()::loadFromDatabase);
+        var questsLoad = runner.submit(this.getQuestManager()::loadFromDatabase);
 
-        runner.submit(this::loadBattlePassManager);
-        runner.submit(this::loadDailyTaskManager);
+        var battlePassLoad = runner.submit(this::loadBattlePassManager);
+        var dailyTasksLoad = runner.submit(this::loadDailyTaskManager);
 
         // With asyncLogin off this runs on the one thread that handles every player's packets.
         // Waiting on the loaded flags forever meant a loader that threw - its exception swallowed
         // by the pool - or a pool full of stuck tasks froze the whole server. Fail this one login
         // instead.
-        awaitLoad("avatars", avatarsLoad);
-        awaitLoad("inventory", inventoryLoad);
-        awaitLoad("achievements", achievementsLoad);
+        awaitLoginLoads(avatarsLoad, inventoryLoad, achievementsLoad, questsLoad, battlePassLoad, dailyTasksLoad);
 
         this.getPlayerProgress().setPlayer(this);
     }
 
     private static final long LOAD_TIMEOUT_SECONDS = 30;
+
+    void awaitLoginLoads(Future<?> avatarsLoad, Future<?> inventoryLoad, Future<?> achievementsLoad,
+            Future<?> questsLoad, Future<?> battlePassLoad, Future<?> dailyTasksLoad) {
+        awaitLoad("avatars", avatarsLoad);
+        awaitLoad("inventory", inventoryLoad);
+        awaitLoad("achievements", achievementsLoad);
+        awaitLoad("quests", questsLoad);
+        awaitLoad("battle pass", battlePassLoad);
+        awaitLoad("daily tasks", dailyTasksLoad);
+    }
 
     private void awaitLoad(String what, java.util.concurrent.Future<?> load) {
         try {
@@ -1697,7 +1824,20 @@ public class Player implements PlayerHook, FieldFetch {
         session.send(new PacketBattlePassAllDataNotify(this));
         session.send(new PacketQuestListNotify(this));
         session.send(new PacketQuestGlobalVarNotify(this));
+        // Tips met before they were tracked, so the codex matches this account's progress.
+        try {
+            PushTipsManager.of(this)
+                    .backfill(
+                            subQuestId -> {
+                                var quest = this.getQuestManager().getQuestById(subQuestId);
+                                return quest != null && quest.getState() == QuestState.QUEST_STATE_FINISHED;
+                            },
+                            monsterId -> this.getCodex().getUnlockedAnimal().containsKey(monsterId));
+        } catch (RuntimeException e) {
+            Grasscutter.getLogger().warn("[PushTips] uid={} backfill failed", this.getUid(), e);
+        }
         session.send(new PacketCodexDataFullNotify(this));
+        session.send(new PacketPushTipsAllDataNotify(PushTipsManager.of(this).states()));
         session.send(new PacketAllWidgetDataNotify(this));
 
         this.achievements.onLogin(this);
