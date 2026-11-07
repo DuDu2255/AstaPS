@@ -593,7 +593,7 @@ public class ConfigContainer {
             /* Optional gradient end color. Blank or invalid values use a flat start color. */
             public String gradientTo = "#FF1493";
             /* CmdId to send the wind seed notify under. 0 (recommended) uses
-             * PacketOpcodes.WindSeedType1Notify, 29056 in 7.1. Set to -1 to send nothing at all.
+             * PacketOpcodes.WindSeedType1Notify, 21002 in 7.2 (29056 in 7.1). Set to -1 to send nothing at all.
              *
              * If the client ever starts crashing a second or two after login, set this to -1 first:
              * this is the one packet whose payload the client EXECUTES as Lua, so a payload it does
